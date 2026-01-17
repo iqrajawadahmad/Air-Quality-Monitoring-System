@@ -1,0 +1,205 @@
+#define BLYNK_TEMPLATE_ID "TMPL6mklENeLw"
+#define BLYNK_TEMPLATE_NAME "Air Quality Monitoring"
+#define BLYNK_AUTH_TOKEN "Q-lnOObSHT4PUi6al5prFyZfb3ZbFrGf"
+
+#include <WiFi.h>
+#include <BlynkSimpleEsp32.h>
+#include <DHT.h>
+#include <HTTPClient.h>
+#include <HTTPUpdate.h>
+#include <ThingESP.h>
+
+// Sensor Pins
+#define DHTPIN 4
+#define DHTTYPE DHT11
+#define MQ135_DOUT_PIN 14
+#define MQ135_AOUT_PIN 34
+
+// OTA Configuration
+#define OTA_API_KEY "1a1be734-1883-4a8e-9f6c-9c84e6c866c5"
+#define FW_VERSION "1.0.0.5"
+
+// ThingESP Configuration
+ThingESP32 thing("Iqra", "AirQuality", "AirQuality");
+
+// WiFi Credentials
+char ssid[] = "Five Net L-82";
+char pass[] = "dimsqira098";
+
+// Global Sensor Variables
+float currentTemp = 0;
+float currentHum = 0;
+int currentGasLevel = 0;
+String currentGasStatus = "Unknown";
+DHT dht(DHTPIN, DHTTYPE);
+BlynkTimer timer;
+uint32_t lastOTACheck = 0;
+
+// ================== ThingESP WhatsApp Handler ==================
+String HandleResponse(String query) {
+  query.toLowerCase();
+  
+  if (query == "temperature") {
+    return "🌡 Temperature: " + String(currentTemp) + "°C";
+  }
+  else if (query == "humidity") {
+    return "💧 Humidity_iqra: " + String(currentHum) + "%";
+  }
+  else if (query == "airquality" || query == "air quality") {
+    return "🌫 Air Quality: " + currentGasStatus + " (" + String(currentGasLevel) + ")";
+  }
+  else if (query == "report") {
+    return "📊 Air Quality Report:\n\n" 
+           "Temperature: " + String(currentTemp) + "°C\n"
+           "Humidity: " + String(currentHum) + "%\n"
+           "Air Quality: " + currentGasStatus + " (" + String(currentGasLevel) + ")";
+  }
+  return "❌ Invalid query! Try:\n- temperature\n- humidity\n- airquality\n- report";
+}
+
+// ================== OTA Functions ==================
+String getChipId() {
+  String ChipIdHex = String((uint32_t)(ESP.getEfuseMac() >> 32), HEX);
+  ChipIdHex += String((uint32_t)ESP.getEfuseMac(), HEX);
+  return ChipIdHex;
+}
+
+void performUpdate() {
+  String url = "http://otadrive.com/deviceapi/update?";
+  url += "k=" OTA_API_KEY;
+  url += "&v=" FW_VERSION;
+  url += "&s=" + getChipId();
+
+  Serial.print("Checking for updates: ");
+  Serial.println(url);
+
+  WiFiClient client;
+  t_httpUpdate_return ret = httpUpdate.update(client, url, FW_VERSION);
+  
+  switch(ret) {
+    case HTTP_UPDATE_FAILED:
+      Serial.printf("Update failed: %s\n", httpUpdate.getLastErrorString().c_str());
+      break;
+    case HTTP_UPDATE_NO_UPDATES:
+      Serial.println("No updates available");
+      break;
+    case HTTP_UPDATE_OK:
+      Serial.println("Update OK - Restarting");
+      break;
+  }
+}
+
+// ================== Google Sheets Integration ==================
+void sendToGoogleSheets(float temp, float hum, int gas) {
+  if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+    http.begin("https://script.google.com/macros/s/AKfycbzl99AlApBLnanHvWD_242Gj7aqne6Zjlknr6W1PPIfFpCTbXmDefcn5bSkYAx8MWOjBA/exec");
+    http.addHeader("Content-Type", "application/x-www-form-urlencoded");
+
+    String postData = "temperature=" + String(temp, 1) +
+                      "&humidity=" + String(hum, 1) +
+                      "&gas=" + String(gas);
+
+    int httpResponseCode = http.POST(postData);
+    Serial.print("Google Sheets response: ");
+    Serial.println(httpResponseCode);
+    http.end();
+  }
+}
+
+// ================== Main Sensor Function ==================
+void readSensorsAndSend() {
+  float temp = dht.readTemperature();
+  float hum = dht.readHumidity();
+  int gasLevel = analogRead(MQ135_AOUT_PIN);
+  int gasDigital = digitalRead(MQ135_DOUT_PIN);
+
+  // Update global variables for WhatsApp queries
+  currentTemp = temp;
+  currentHum = hum;
+  currentGasLevel = gasLevel;
+
+  // Serial Monitor Outputs
+  Serial.println("\n--- Sensor Readings ---");
+  Serial.print("Temperature: ");
+  Serial.print(temp);
+  Serial.println(" °C");
+  Serial.print("Humidity_iqra: ");
+  Serial.print(hum);
+  Serial.println(" %");
+  Serial.print("Gas Level (Analog): ");
+  Serial.println(gasLevel);
+  Serial.print("Gas Digital: ");
+  Serial.println(gasDigital ? "HIGH (Danger)" : "LOW (Safe)");
+
+  if (isnan(temp) || isnan(hum)) {
+    Serial.println("Failed to read DHT sensor!");
+    return;
+  }
+
+  // Air quality status determination
+  if (gasLevel < 200) {
+    currentGasStatus = "Good 🌟";
+  } else if (gasLevel < 400) {
+    currentGasStatus = "Moderate ⚠️";
+  } else if (gasLevel < 600) {
+    currentGasStatus = "Poor ❗";
+  } else {
+    currentGasStatus = "Dangerous ‼️";
+    Blynk.logEvent("pollution_alert", "⚠ Bad Air! Gas: " + String(gasLevel));
+  }
+  Serial.println(currentGasStatus);
+
+  // Temperature alerts
+  if (temp > 40) {
+    Blynk.logEvent("heat_alert", "High Temp: " + String(temp, 1) + "°C");
+    Serial.println("High Temperature Alert!");
+  }
+
+  // Blynk updates
+  Blynk.virtualWrite(V0, temp);
+  Blynk.virtualWrite(V1, hum);
+  Blynk.virtualWrite(V2, gasLevel);
+  Blynk.virtualWrite(V3, currentGasStatus);
+
+  // Google Sheets
+  sendToGoogleSheets(temp, hum, gasLevel);
+}
+
+// ================== Setup & Loop ==================
+// ================== Setup & Loop ==================
+void setup() {
+  Serial.begin(115200);
+  pinMode(MQ135_DOUT_PIN, INPUT);
+  dht.begin();
+
+  // Initialize WiFi
+  WiFi.begin(ssid, pass);
+  Serial.print("Connecting to WiFi...");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nConnected! IP: " + WiFi.localIP().toString());
+
+  // Initialize ThingESP (NO parameters) - CORRECTED LINE
+  thing.initDevice();  // ✅ Remove parameter here
+
+  // Initialize Blynk
+  Blynk.begin(BLYNK_AUTH_TOKEN, ssid, pass);
+  timer.setInterval(5000L, readSensorsAndSend);
+}
+
+void loop() {
+  Blynk.run();
+  timer.run();
+  thing.Handle(); // Handle WhatsApp messages
+
+  // OTA Check
+  if (millis() - lastOTACheck > 300000) {
+    lastOTACheck = millis();
+    if (WiFi.status() == WL_CONNECTED) {
+      performUpdate();
+    }
+  }
+}
