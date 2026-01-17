@@ -32,4 +32,4 @@ Key components:
 
 ## Full Project Report
 You can view the complete project report here:  
-[Air Quality Monitoring System Report (PDF)](Air_Quality_Monitoring_System.pdf)
+[Air Quality Monitoring System Report (PDF)](Air_Quality_Monitoring_System_Report.pdf)
